@@ -986,7 +986,21 @@ class ChapterGenerationNode(BaseNode):
                                 logger.warning(f"walk: 从列表中提取字典 block")
                                 break
                         else:
-                            logger.warning(f"walk: 跳过无效的列表 block: {block}")
+                            # 列表中无字典——常见于 json_repair 将 {"key"} 转为 ["key"]
+                            # 尝试将字符串元素拼接为 paragraph，避免静默丢失内容
+                            str_parts = [
+                                str(item) for item in block
+                                if isinstance(item, str) and item.strip()
+                            ]
+                            if str_parts:
+                                merged = " ".join(str_parts)
+                                blocks[idx] = self._as_paragraph_block(merged)
+                                valid_indices.append(idx)
+                                logger.warning(
+                                    f"walk: 将字符串列表 block 转换为 paragraph: {block}"
+                                )
+                            else:
+                                logger.warning(f"walk: 跳过无效的列表 block: {block}")
                     else:
                         logger.warning(f"walk: 跳过无效的 block（类型: {type(block).__name__}）")
                 else:

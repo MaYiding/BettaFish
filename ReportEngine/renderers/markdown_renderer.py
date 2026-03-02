@@ -376,6 +376,94 @@ class MarkdownRenderer:
 
         return fixed_rows
 
+    def _expand_rowspan_rows(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        展开因 rowspan 而被 LLM 压缩到单行中的表格数据。
+
+        某些 LLM 生成的表格会将本应分散在多行中的数据全部放入一个数据行，
+        用 rowspan 属性标注合并关系。例如一个5列表格的数据行可能包含48个单元格，
+        本方法将其按表头列数拆分为正确的多行结构。
+
+        参数:
+            rows: 表格行数组（第一行通常为表头）。
+
+        返回:
+            List[Dict]: 展开后的表格行数组。
+        """
+        if len(rows) < 2:
+            return rows
+
+        # 以第一行的单元格数作为表头列数基准
+        first_row = rows[0]
+        first_cells = first_row.get("cells", [])
+        header_col_count = len(self._flatten_nested_cells(first_cells)) if first_cells else 0
+        if header_col_count < 2:
+            return rows
+
+        expanded = [first_row]
+        for row in rows[1:]:
+            if not isinstance(row, dict):
+                expanded.append(row)
+                continue
+            cells = row.get("cells", [])
+            flat_cells = self._flatten_nested_cells(cells) if cells else []
+            cell_count = len(flat_cells)
+
+            # 仅在数据行单元格数远超表头列数且存在 rowspan 时才展开
+            if cell_count <= header_col_count * 1.5:
+                expanded.append(row)
+                continue
+
+            has_rowspan = any(
+                isinstance(c, dict) and (c.get("rowspan") or 0) > 1
+                for c in flat_cells
+            )
+            if not has_rowspan:
+                expanded.append(row)
+                continue
+
+            # 按表头列数拆分单元格为多行
+            # 策略：遍历单元格，遇到带 rowspan 的单元格时开始一组新的子行
+            sub_rows: List[List[Dict[str, Any]]] = []
+            current_row_cells: List[Dict[str, Any]] = []
+            current_span_cell: Dict[str, Any] | None = None
+            span_remaining = 0
+
+            for cell in flat_cells:
+                rs = int(cell.get("rowspan") or 1)
+
+                if rs > 1 and len(current_row_cells) == 0:
+                    # 新的 rowspan 组开始
+                    if current_span_cell is not None and sub_rows:
+                        pass  # 上一组已结束
+                    current_span_cell = cell
+                    span_remaining = rs
+                    current_row_cells.append(cell)
+                elif len(current_row_cells) >= header_col_count:
+                    # 当前行已满，存入并开启新行
+                    sub_rows.append(current_row_cells)
+                    current_row_cells = []
+                    if span_remaining > 1:
+                        # rowspan 单元格跨到下一行，不重复添加
+                        span_remaining -= 1
+                    if rs > 1:
+                        current_span_cell = cell
+                        span_remaining = rs
+                        current_row_cells.append(cell)
+                    else:
+                        current_row_cells.append(cell)
+                else:
+                    current_row_cells.append(cell)
+
+            if current_row_cells:
+                sub_rows.append(current_row_cells)
+
+            # 确保每个子行的列数不超过表头列数
+            for sr in sub_rows:
+                expanded.append({"cells": sr[:header_col_count]})
+
+        return expanded
+
     def _render_table(self, block: Dict[str, Any]) -> str:
         raw_rows = block.get("rows") or []
         if not raw_rows:
@@ -383,6 +471,9 @@ class MarkdownRenderer:
 
         # 先修复可能存在的嵌套行结构问题
         rows = self._fix_nested_table_rows(raw_rows)
+
+        # 展开因 rowspan 被 LLM 压缩到单行中的数据
+        rows = self._expand_rowspan_rows(rows)
 
         header_cells: List[str] = []
         body_rows: List[List[str]] = []

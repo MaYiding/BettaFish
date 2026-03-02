@@ -544,6 +544,11 @@ class ChartToSVGConverter:
             # 绘制每个数据系列
             for i, dataset in enumerate(datasets):
                 dataset_data = dataset.get('data', [])
+                # 将 None 转换为 np.nan，避免 matplotlib 的 isfinite 类型错误
+                if isinstance(dataset_data, list):
+                    dataset_data = [
+                        np.nan if v is None else v for v in dataset_data
+                    ]
                 label = dataset.get('label', f'系列{i+1}')
                 color = colors[i]
 
@@ -609,9 +614,14 @@ class ChartToSVGConverter:
                     # 绘制折线
                     x_data = range(len(labels))
 
+                    # 检查数据中是否包含 NaN（NaN 不兼容样条插值）
+                    has_nan = any(
+                        isinstance(v, float) and np.isnan(v) for v in dataset_data
+                    )
+
                     # 根据tension值决定是否平滑
-                    if tension > 0 and SCIPY_AVAILABLE:
-                        # 使用样条插值平滑曲线（需要scipy）
+                    if tension > 0 and SCIPY_AVAILABLE and not has_nan:
+                        # 使用样条插值平滑曲线（需要scipy, 且数据不含NaN）
                         if len(dataset_data) >= 4:  # 至少需要4个点才能平滑
                             try:
                                 x_smooth = np.linspace(0, len(labels)-1, len(labels)*3)
