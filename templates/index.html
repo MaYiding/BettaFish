@@ -3586,21 +3586,23 @@ function getConsoleContainer() {
             console.log(`卸载 ${app} iframe，释放内存`);
         }
 
-        // 卸载所有非当前应用的iframe
+        // 卸载所有非当前应用的iframe（带去重，防止定时器堆积）
+        let _unloadTimers = {};
         function unloadInactiveIframes(currentApp) {
             const apps = ['insight', 'media', 'query'];
             apps.forEach(app => {
                 if (app !== currentApp && preloadedIframes[app]) {
-                    // 延迟卸载,给一些缓冲时间
-                    setTimeout(() => {
+                    // 已有定时器则跳过，防止每次状态轮询都创建新定时器
+                    if (_unloadTimers[app]) return;
+                    _unloadTimers[app] = setTimeout(() => {
+                        delete _unloadTimers[app];
                         // 再次确认没有切换回来,并且该应用已经停止运行
-                        // 重要:不要卸载正在运行的iframe,否则会丢失进度
                         if (currentApp !== app && appStatus[app] !== 'running' && appStatus[app] !== 'starting') {
                             unloadIframe(app);
                         } else {
                             console.log(`保留 ${app} iframe - 应用正在运行或已切换回来`);
                         }
-                    }, 30000); // 30秒后卸载不活跃的iframe
+                    }, 30000);
                 }
             });
         }
@@ -3772,7 +3774,7 @@ function getConsoleContainer() {
         function updateAppStatus(data) {
             for (const [app, info] of Object.entries(data)) {
                 // 适配实际的API格式：{app: {status: string, port: int, output_lines: int}}
-                const status = info.status === 'running' ? 'running' : 'stopped';
+                const status = (info.status === 'running' || info.status === 'starting') ? 'running' : 'stopped';
                 appStatus[app] = status;
                 
                 const indicator = document.getElementById(`status-${app}`);

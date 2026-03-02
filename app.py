@@ -682,7 +682,8 @@ def start_streamlit_app(app_name, script_path, port):
             cwd=os.getcwd(),
             env=env,
             encoding=None,  # 让我们手动处理编码
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+            start_new_session=(sys.platform != 'win32')  # 隔离子进程组，防止父进程信号传播
         )
         
         processes[app_name]['process'] = process
