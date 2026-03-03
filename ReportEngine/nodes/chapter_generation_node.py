@@ -238,10 +238,17 @@ class ChapterGenerationNode(BaseNode):
                 placeholder_created = True
 
         # 自动补全关键字段后再校验
-        chapter_json.setdefault("chapterId", section.chapter_id)
+        # order 和 chapterId 由模板分配，必须强制覆盖以防 LLM 输出错误值
+        for field, expected in [("order", section.order), ("chapterId", section.chapter_id)]:
+            llm_val = chapter_json.get(field)
+            if llm_val is not None and llm_val != expected:
+                logger.warning(
+                    f"{section.title}: LLM 输出 {field}={llm_val!r}，"
+                    f"期望 {expected!r}，已强制覆盖"
+                )
+            chapter_json[field] = expected
         chapter_json.setdefault("anchor", section.slug)
         chapter_json.setdefault("title", section.title)
-        chapter_json.setdefault("order", section.order)
         self._sanitize_chapter_blocks(chapter_json)
 
         valid, errors = self.validator.validate_chapter(chapter_json)
@@ -253,10 +260,16 @@ class ChapterGenerationNode(BaseNode):
             )
             if repaired:
                 chapter_json = repaired
-                chapter_json.setdefault("chapterId", section.chapter_id)
+                for field, expected in [("order", section.order), ("chapterId", section.chapter_id)]:
+                    llm_val = chapter_json.get(field)
+                    if llm_val is not None and llm_val != expected:
+                        logger.warning(
+                            f"{section.title}: LLM修复后 {field}={llm_val!r}，"
+                            f"期望 {expected!r}，已强制覆盖"
+                        )
+                    chapter_json[field] = expected
                 chapter_json.setdefault("anchor", section.slug)
                 chapter_json.setdefault("title", section.title)
-                chapter_json.setdefault("order", section.order)
                 self._sanitize_chapter_blocks(chapter_json)
                 valid, errors = self.validator.validate_chapter(chapter_json)
         content_error: ChapterContentError | None = None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any, Dict, List
 
@@ -20,6 +21,7 @@ class MarkdownRenderer:
     def __init__(self) -> None:
         self.document: Dict[str, Any] = {}
         self.metadata: Dict[str, Any] = {}
+        self.heading_label_map: Dict[str, Dict[str, Any]] = {}
 
     def render(
         self,
@@ -36,7 +38,7 @@ class MarkdownRenderer:
         返回:
             str: Markdown 字符串
         """
-        self.document = document_ir or {}
+        self.document = copy.deepcopy(document_ir) if document_ir else {}
 
         # 使用统一的 ChartReviewService 进行图表审查与修复
         # 虽然 Markdown 渲染时图表会降级为表格，但仍需确保数据有效
@@ -57,7 +59,14 @@ class MarkdownRenderer:
             parts.append(f"# {self._escape_text(title)}")
             parts.append("")
 
-        for chapter in self.document.get("chapters", []) or []:
+        # 防御性排序 + 预计算标题编号（与 HTML/PDF 渲染器对齐）
+        chapters = sorted(
+            self.document.get("chapters", []) or [],
+            key=lambda c: c.get("order", 0)
+        )
+        self.heading_label_map = self._compute_heading_labels(chapters)
+
+        for chapter in chapters:
             chapter_md = self._render_chapter(chapter)
             if chapter_md:
                 parts.append(chapter_md)
@@ -68,15 +77,21 @@ class MarkdownRenderer:
 
     def _render_chapter(self, chapter: Dict[str, Any]) -> str:
         lines: List[str] = []
-        title = chapter.get("title") or chapter.get("chapterId")
+        raw_title = chapter.get("title") or chapter.get("chapterId")
         blocks = chapter.get("blocks", []) if isinstance(chapter.get("blocks"), list) else []
+
+        # 优先使用预计算的重编号标题，回退到原始 title
+        anchor = chapter.get("anchor")
+        mapping = self.heading_label_map.get(anchor, {}) if anchor else {}
+        title = mapping.get("display") or raw_title
 
         # 章节标题使用一级标题格式，并避免与首个heading重复
         if title:
             lines.append(f"# {self._escape_text(title)}")
             lines.append("")
 
-        if blocks and self._is_heading_duplicate(blocks[0], title):
+        # 去重判断使用原始 title（在数据层面比较，不受渲染层编号替换影响）
+        if blocks and self._is_heading_duplicate(blocks[0], raw_title):
             blocks = blocks[1:]
 
         body = self._render_blocks(blocks)
@@ -137,7 +152,10 @@ class MarkdownRenderer:
         level = block.get("level", 2)
         level = max(1, min(6, level))
         hashes = "#" * level
-        text = block.get("text") or ""
+        # 优先使用预计算的重编号文本，回退到 LLM 原始文本
+        anchor = block.get("anchor")
+        mapping = self.heading_label_map.get(anchor, {}) if anchor else {}
+        text = mapping.get("display") or block.get("text") or ""
         subtitle = block.get("subtitle")
         subtitle_text = f" _{self._escape_text(subtitle)}_" if subtitle else ""
         heading_line = f"{hashes} {self._escape_text(text)}{subtitle_text}"
@@ -981,6 +999,114 @@ class MarkdownRenderer:
         elif tone_val in ("down", "decrease", "negative"):
             prefix = "▼ "
         return f"{prefix}{delta}"
+
+    def _compute_heading_labels(self, chapters: list) -> Dict[str, Dict[str, Any]]:
+        """
+        预计算各级标题的编号（章：一、二；节：1.1；小节：1.1.1）。
+
+        按数组位置重新分配编号，与 HTMLRenderer._compute_heading_labels 逻辑一致。
+        额外为每个 chapter anchor 预置一条章级映射，确保 _render_chapter()
+        即使在 chapter anchor ≠ 首个 heading anchor 时也能查到正确编号。
+        """
+        label_map: Dict[str, Dict[str, Any]] = {}
+
+        for chap_idx, chapter in enumerate(chapters or [], start=1):
+            # 为 chapter 级别预置映射（用 chapter["title"] 作为文本来源）
+            # 这是 Markdown 渲染器独有的需求：_render_chapter() 单独渲染 # title
+            chapter_anchor = chapter.get("anchor")
+            if chapter_anchor:
+                chapter_title_text = chapter.get("title", "")
+                clean_chapter_title = self._strip_order_prefix(chapter_title_text)
+                chapter_label = f"{self._to_chinese_numeral(chap_idx)}、"
+                label_map[chapter_anchor] = {
+                    "level": 1,
+                    "display": f"{chapter_label} {clean_chapter_title}".strip(),
+                    "label": chapter_label,
+                    "title": clean_chapter_title,
+                }
+
+            chapter_heading_seen = False
+            section_idx = 0
+            subsection_idx = 0
+            deep_counters: Dict[int, int] = {}
+
+            for block in chapter.get("blocks", []):
+                if block.get("type") != "heading":
+                    continue
+                level = block.get("level", 2)
+                anchor = block.get("anchor") or chapter.get("anchor")
+                if not anchor:
+                    continue
+
+                raw_text = block.get("text", "")
+                clean_title = self._strip_order_prefix(raw_text)
+                label = None
+                display_text = raw_text
+
+                if not chapter_heading_seen:
+                    label = f"{self._to_chinese_numeral(chap_idx)}、"
+                    display_text = f"{label} {clean_title}".strip()
+                    chapter_heading_seen = True
+                    section_idx = 0
+                    subsection_idx = 0
+                    deep_counters.clear()
+                elif level <= 2:
+                    section_idx += 1
+                    subsection_idx = 0
+                    deep_counters.clear()
+                    label = f"{chap_idx}.{section_idx}"
+                    display_text = f"{label} {clean_title}".strip()
+                else:
+                    if section_idx == 0:
+                        section_idx = 1
+                    if level == 3:
+                        subsection_idx += 1
+                        deep_counters.clear()
+                        label = f"{chap_idx}.{section_idx}.{subsection_idx}"
+                    else:
+                        deep_counters[level] = deep_counters.get(level, 0) + 1
+                        parts = [str(chap_idx), str(section_idx or 1), str(subsection_idx or 1)]
+                        for lvl in sorted(deep_counters.keys()):
+                            parts.append(str(deep_counters[lvl]))
+                        label = ".".join(parts)
+                    display_text = f"{label} {clean_title}".strip()
+
+                label_map[anchor] = {
+                    "level": level,
+                    "display": display_text,
+                    "label": label,
+                    "title": clean_title,
+                }
+        return label_map
+
+    @staticmethod
+    def _strip_order_prefix(text: str) -> str:
+        """移除形如"1.0 "或"一、"的前缀，得到纯标题文本"""
+        if not text:
+            return ""
+        separators = [" ", "、", ".", "．"]
+        stripped = text.lstrip()
+        for sep in separators:
+            parts = stripped.split(sep, 1)
+            if len(parts) == 2 and parts[0]:
+                return parts[1].strip()
+        return stripped.strip()
+
+    @staticmethod
+    def _to_chinese_numeral(number: int) -> str:
+        """将1/2/3映射为中文序号（十内）"""
+        numerals = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+        if number <= 10:
+            return numerals[number]
+        tens, ones = divmod(number, 10)
+        if number < 20:
+            return "十" + (numerals[ones] if ones else "")
+        words = ""
+        if tens > 0:
+            words += numerals[tens] + "十"
+        if ones:
+            words += numerals[ones]
+        return words
 
     def _fallback_unknown(self, block: Dict[str, Any]) -> str:
         try:
